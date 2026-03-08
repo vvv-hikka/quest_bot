@@ -1,6 +1,7 @@
 """Supabase client for quest_clients table."""
 
 from __future__ import annotations
+from datetime import datetime, timezone
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_ANON_KEY
 
@@ -33,7 +34,7 @@ def mark_complete(telegram_id: int) -> None:
     client().table("quest_clients").update({
         "profile_complete": True,
         "survey_step": "done",
-        "completed_at": "now()",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
         "next_reminder_at": None,
     }).eq("telegram_id", telegram_id).execute()
 

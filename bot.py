@@ -78,7 +78,7 @@ Q_WORK_VALUES = (
 COMPLETE_MSG = (
     "🎉 <b>Поздравляем с регистрацией!</b>\n\n"
     f"Чтобы не пропустить обновления, подпишись на наш телеграм-канал — {CHANNEL_USERNAME}.\n\n"
-    "Спасибо, что помогаешь развивать адекватный HR в России! 🇷🇺"
+    "Спасибо за твой вклад в развитие адекватных HR-процессов!"
 )
 
 REMINDER_MSG = (
@@ -185,10 +185,28 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 # ── Начало анкеты ───────────────────────────────────────────────
 
+# Восстановление шага анкеты из БД (survey_step -> state, вопрос, клавиатура)
+RESUME_STEPS = {
+    "phone": (Survey.phone, Q_PHONE, None),
+    "email": (Survey.email, Q_EMAIL, None),
+    "specialty": (Survey.specialty, Q_SPECIALTY, None),
+    "resume": (Survey.resume, Q_RESUME, kb_skip()),
+    "portfolio": (Survey.portfolio, Q_PORTFOLIO, kb_skip()),
+    "soft_skills": (Survey.soft_skills, Q_SOFT_SKILLS, kb_skip()),
+    "work_values": (Survey.work_values, Q_WORK_VALUES, kb_skip()),
+}
+
 @router.callback_query(F.data == "survey:start")
 async def start_survey(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(Survey.full_name)
-    await callback.message.answer(Q_FULL_NAME, parse_mode="HTML")
+    existing = db.get_client_by_tg(callback.from_user.id)
+    step = existing.get("survey_step") if existing else None
+    if step and step in RESUME_STEPS:
+        st, text, kb = RESUME_STEPS[step]
+        await state.set_state(st)
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await state.set_state(Survey.full_name)
+        await callback.message.answer(Q_FULL_NAME, parse_mode="HTML")
     await callback.answer()
 
 
@@ -203,6 +221,9 @@ async def edit_profile(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Survey.full_name)
 async def on_full_name(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, введи ФИО текстом.")
+        return
     db.upsert_client(message.from_user.id, full_name=message.text.strip(), survey_step="phone")
     await state.set_state(Survey.phone)
     await message.answer(Q_PHONE, parse_mode="HTML")
@@ -224,6 +245,9 @@ async def on_phone(message: Message, state: FSMContext) -> None:
 
 @router.message(Survey.email)
 async def on_email(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, введи почту текстом.")
+        return
     db.upsert_client(message.from_user.id, email=message.text.strip(), survey_step="specialty")
     await state.set_state(Survey.specialty)
     await message.answer(Q_SPECIALTY, parse_mode="HTML")
@@ -233,6 +257,9 @@ async def on_email(message: Message, state: FSMContext) -> None:
 
 @router.message(Survey.specialty)
 async def on_specialty(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, введи специальность текстом.")
+        return
     db.upsert_client(message.from_user.id, specialty=message.text.strip(), survey_step="resume")
     await state.set_state(Survey.resume)
     await message.answer(Q_RESUME, parse_mode="HTML", reply_markup=kb_skip())
@@ -268,6 +295,16 @@ async def on_resume_link(message: Message, state: FSMContext) -> None:
     await message.answer("🔗 Ссылка сохранена!\n\n" + Q_PORTFOLIO, parse_mode="HTML", reply_markup=kb_skip())
 
 
+@router.message(Survey.resume)
+async def on_resume_other(message: Message, state: FSMContext) -> None:
+    """Резюме: прислали не документ и не текст (фото, голос и т.д.)."""
+    await message.answer(
+        "Отправь резюме PDF-файлом ссылкой. Либо нажми «Пропустить».",
+        parse_mode="HTML",
+        reply_markup=kb_skip(),
+    )
+
+
 # ── Портфолио (можно пропустить) ────────────────────────────────
 
 @router.callback_query(Survey.portfolio, F.data == "survey:skip")
@@ -280,6 +317,9 @@ async def skip_portfolio(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Survey.portfolio)
 async def on_portfolio(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, отправь описание портфолио текстом или нажми «Пропустить».")
+        return
     db.upsert_client(message.from_user.id, portfolio=message.text.strip(), survey_step="soft_skills")
     await state.set_state(Survey.soft_skills)
     await message.answer(Q_SOFT_SKILLS, parse_mode="HTML", reply_markup=kb_skip())
@@ -297,6 +337,9 @@ async def skip_soft_skills(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Survey.soft_skills)
 async def on_soft_skills(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, отправь текст о софт-скиллах или нажми «Пропустить».")
+        return
     db.upsert_client(message.from_user.id, soft_skills=message.text.strip(), survey_step="work_values")
     await state.set_state(Survey.work_values)
     await message.answer(Q_WORK_VALUES, parse_mode="HTML", reply_markup=kb_skip())
@@ -312,7 +355,10 @@ async def skip_work_values(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Survey.work_values)
 async def on_work_values(message: Message, state: FSMContext) -> None:
-    db.upsert_client(message.from_user.id, work_values=message.text.strip())
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, отправь текст о ценностях в работе или нажми «Пропустить».")
+        return
+    db.upsert_client(message.from_user.id, work_values=message.text.strip(), survey_step="work_values")
     await _finish(message.from_user.id, message, state)
 
 
