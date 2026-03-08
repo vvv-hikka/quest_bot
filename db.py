@@ -1,13 +1,49 @@
-"""Supabase client for quest_clients table."""
+"""Supabase client for quest_clients table.
+
+Публичный API — async-функции (get_client_by_tg, upsert_client, ...), чтобы не блокировать
+event loop при медленных запросах. Внутри вызовы выполняются в потоке (executor) с семафором.
+"""
 
 from __future__ import annotations
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_ANON_KEY
 
 log = logging.getLogger(__name__)
 _client: Client | None = None
+_executor: ThreadPoolExecutor | None = None
+_db_semaphore: asyncio.Semaphore | None = None
+
+# Макс. одновременных обращений к БД (остальные ждут в очереди)
+MAX_CONCURRENT_DB = 10
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    global _executor
+    if _executor is None:
+        _executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DB, thread_name_prefix="db")
+    return _executor
+
+
+def _get_db_semaphore() -> asyncio.Semaphore:
+    global _db_semaphore
+    if _db_semaphore is None:
+        _db_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB)
+    return _db_semaphore
+
+
+async def _run_sync(sync_fn, *args, **kwargs):
+    """Выполняет синхронную функцию в потоке, не блокируя event loop."""
+    loop = asyncio.get_event_loop()
+    sem = _get_db_semaphore()
+    async with sem:
+        return await loop.run_in_executor(
+            _get_executor(),
+            lambda: sync_fn(*args, **kwargs),
+        )
 
 
 def client() -> Client:
@@ -17,13 +53,13 @@ def client() -> Client:
     return _client
 
 
-def get_client_by_tg(telegram_id: int) -> dict | None:
+def _get_client_by_tg_sync(telegram_id: int) -> dict | None:
     resp = client().table("quest_clients").select("*").eq("telegram_id", telegram_id).execute()
     return resp.data[0] if resp.data else None
 
 
-def upsert_client(telegram_id: int, **fields) -> dict:
-    existing = get_client_by_tg(telegram_id)
+def _upsert_client_sync(telegram_id: int, **fields) -> dict:
+    existing = _get_client_by_tg_sync(telegram_id)
     if existing:
         client().table("quest_clients").update(fields).eq("telegram_id", telegram_id).execute()
         result = {**existing, **fields}
@@ -35,7 +71,7 @@ def upsert_client(telegram_id: int, **fields) -> dict:
     return result
 
 
-def mark_complete(telegram_id: int) -> None:
+def _mark_complete_sync(telegram_id: int) -> None:
     client().table("quest_clients").update({
         "profile_complete": True,
         "survey_step": "done",
@@ -45,20 +81,42 @@ def mark_complete(telegram_id: int) -> None:
     log_funnel_step(telegram_id, "done")
 
 
-def set_reminder(telegram_id: int, next_at: str, reminders_sent: int) -> None:
+def _set_reminder_sync(telegram_id: int, next_at: str, reminders_sent: int) -> None:
     client().table("quest_clients").update({
         "next_reminder_at": next_at,
         "reminders_sent": reminders_sent,
     }).eq("telegram_id", telegram_id).execute()
 
 
-def get_pending_reminders(now_iso: str) -> list[dict]:
+def _get_pending_reminders_sync(now_iso: str) -> list[dict]:
     resp = (client().table("quest_clients")
             .select("*")
             .eq("profile_complete", False)
             .lte("next_reminder_at", now_iso)
             .execute())
     return resp.data
+
+
+# ─── Публичный async API (использовать в боте) ────────────────────
+
+async def get_client_by_tg(telegram_id: int) -> dict | None:
+    return await _run_sync(_get_client_by_tg_sync, telegram_id)
+
+
+async def upsert_client(telegram_id: int, **fields) -> dict:
+    return await _run_sync(_upsert_client_sync, telegram_id, **fields)
+
+
+async def mark_complete(telegram_id: int) -> None:
+    await _run_sync(_mark_complete_sync, telegram_id)
+
+
+async def set_reminder(telegram_id: int, next_at: str, reminders_sent: int) -> None:
+    await _run_sync(_set_reminder_sync, telegram_id, next_at, reminders_sent)
+
+
+async def get_pending_reminders(now_iso: str) -> list[dict]:
+    return await _run_sync(_get_pending_reminders_sync, now_iso)
 
 
 def log_funnel_step(telegram_id: int, step: str) -> None:
