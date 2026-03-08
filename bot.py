@@ -2,6 +2,9 @@
 QUEST Telegram Bot — клиентская анкета.
 
 Запуск: python bot.py
+
+Важно: для одного токена должен работать только один процесс бота (один polling).
+Иначе Telegram возвращает Conflict. Перед стартом вызывается delete_webhook(drop_pending_updates=True).
 """
 
 import asyncio
@@ -420,9 +423,17 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
+    # Снять webhook (если был) и отменить старые обновления — иначе возможен
+    # Conflict от другого процесса или предыдущего запуска.
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        log.info("Webhook removed, pending updates dropped.")
+    except Exception as e:
+        log.warning("delete_webhook: %s", e)
+
     asyncio.create_task(reminder_loop(bot))
 
-    log.info("Starting QUEST bot...")
+    log.info("Starting QUEST bot (only one instance must run per token)...")
     await dp.start_polling(bot)
 
 
