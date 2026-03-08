@@ -1,10 +1,12 @@
 """Supabase client for quest_clients table."""
 
 from __future__ import annotations
+import logging
 from datetime import datetime, timezone
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_ANON_KEY
 
+log = logging.getLogger(__name__)
 _client: Client | None = None
 
 
@@ -60,18 +62,25 @@ def get_pending_reminders(now_iso: str) -> list[dict]:
 
 
 def log_funnel_step(telegram_id: int, step: str) -> None:
-    """Пишет в историю воронки: пользователь перешёл на шаг step."""
-    client().table("quest_funnel_events").insert({
-        "telegram_id": telegram_id,
-        "step": step,
-    }).execute()
+    """Пишет в историю воронки: пользователь перешёл на шаг step. При ошибке (нет таблицы и т.д.) не падаем."""
+    try:
+        client().table("quest_funnel_events").insert({
+            "telegram_id": telegram_id,
+            "step": step,
+        }).execute()
+    except Exception as e:
+        log.warning("Funnel log failed (table quest_funnel_events may be missing): %s", e)
 
 
 def get_funnel_events(telegram_id: int) -> list[dict]:
-    """История переходов одного пользователя по шагам (по порядку)."""
-    resp = (client().table("quest_funnel_events")
-            .select("step, created_at")
-            .eq("telegram_id", telegram_id)
-            .order("created_at")
-            .execute())
-    return resp.data
+    """История переходов одного пользователя по шагам (по порядку). При отсутствии таблицы возвращает []."""
+    try:
+        resp = (client().table("quest_funnel_events")
+                .select("step, created_at")
+                .eq("telegram_id", telegram_id)
+                .order("created_at")
+                .execute())
+        return resp.data
+    except Exception as e:
+        log.warning("get_funnel_events failed: %s", e)
+        return []
