@@ -431,6 +431,13 @@ async def main() -> None:
     except Exception as e:
         log.warning("delete_webhook: %s", e)
 
+    # Пауза перед polling: даём предыдущему процессу (старый контейнер/реплика) время
+    # завершить getUpdates и освободить токен. Иначе возможен Conflict при перезапуске.
+    POLLING_START_DELAY = 5
+    if POLLING_START_DELAY > 0:
+        log.info("Waiting %s s before polling (avoid Conflict on restart)...", POLLING_START_DELAY)
+        await asyncio.sleep(POLLING_START_DELAY)
+
     asyncio.create_task(reminder_loop(bot))
 
     log.info("Starting QUEST bot (only one instance must run per token)...")
