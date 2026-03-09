@@ -164,6 +164,20 @@ def kb_edit_profile() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✏️ Редактировать профиль", callback_data="profile:edit")],
     ])
 
+
+def kb_edit_profile_fields() -> InlineKeyboardMarkup:
+    """Клавиатура выбора поля для редактирования."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 ФИО", callback_data="profile:edit_field:full_name")],
+        [InlineKeyboardButton(text="📱 Телефон", callback_data="profile:edit_field:phone")],
+        [InlineKeyboardButton(text="📧 Почта", callback_data="profile:edit_field:email")],
+        [InlineKeyboardButton(text="💼 Специальность", callback_data="profile:edit_field:specialty")],
+        [InlineKeyboardButton(text="📄 Резюме", callback_data="profile:edit_field:resume")],
+        [InlineKeyboardButton(text="🎨 Портфолио", callback_data="profile:edit_field:portfolio")],
+        [InlineKeyboardButton(text="🤝 Софт-скиллы", callback_data="profile:edit_field:soft_skills")],
+        [InlineKeyboardButton(text="💡 Ценности в работе", callback_data="profile:edit_field:work_values")],
+    ])
+
 def kb_continue_survey() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Продолжить заполнение", callback_data="survey:start")],
@@ -173,6 +187,18 @@ def kb_continue_survey() -> InlineKeyboardMarkup:
 # ── FSM ─────────────────────────────────────────────────────────
 
 class Survey(StatesGroup):
+    full_name = State()
+    phone = State()
+    email = State()
+    specialty = State()
+    resume = State()
+    portfolio = State()
+    soft_skills = State()
+    work_values = State()
+
+
+class EditProfile(StatesGroup):
+    """Редактирование одного поля профиля (после выбора в меню)."""
     full_name = State()
     phone = State()
     email = State()
@@ -223,13 +249,19 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     tg = message.from_user
 
     existing = await db.get_client_by_tg(tg.id)
+
+    # Всегда записываем/обновляем запись пользователя в БД при /start (без имени из профиля Telegram)
+    user_fields = {"telegram_username": tg.username}
+    if not existing:
+        user_fields["survey_step"] = "started"
+    await db.upsert_client(tg.id, **user_fields)
+
     if existing and existing.get("profile_complete"):
         await message.answer(format_profile(existing), parse_mode="HTML",
                              reply_markup=kb_edit_profile())
         return
 
     if not existing:
-        await db.upsert_client(tg.id, telegram_username=tg.username, survey_step="started")
         await schedule_first_reminder(tg.id)
 
     await message.answer(WELCOME, parse_mode="HTML", reply_markup=kb_start_survey())
@@ -262,11 +294,169 @@ async def start_survey(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+EDIT_FIELD_PROMPTS = {
+    "full_name": ("ФИО", Q_FULL_NAME, None),
+    "phone": ("Телефон", Q_PHONE, None),
+    "email": ("Почта", Q_EMAIL, None),
+    "specialty": ("Специальность", Q_SPECIALTY, None),
+    "resume": ("Резюме", Q_RESUME, kb_skip()),
+    "portfolio": ("Портфолио", Q_PORTFOLIO, kb_skip()),
+    "soft_skills": ("Софт-скиллы", Q_SOFT_SKILLS, kb_skip()),
+    "work_values": ("Ценности в работе", Q_WORK_VALUES, kb_skip()),
+}
+
+
 @router.callback_query(F.data == "profile:edit")
 async def edit_profile(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(Survey.full_name)
-    await callback.message.answer("Давай обновим профиль.\n\n" + Q_FULL_NAME, parse_mode="HTML")
+    await state.clear()
+    await callback.message.answer(
+        "Что хочешь изменить? Выбери поле:",
+        parse_mode="HTML",
+        reply_markup=kb_edit_profile_fields(),
+    )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("profile:edit_field:"))
+async def edit_profile_field(callback: CallbackQuery, state: FSMContext) -> None:
+    field = callback.data.replace("profile:edit_field:", "")
+    if field not in EDIT_FIELD_PROMPTS:
+        await callback.answer()
+        return
+    label, question, kb = EDIT_FIELD_PROMPTS[field]
+    state_map = {
+        "full_name": EditProfile.full_name,
+        "phone": EditProfile.phone,
+        "email": EditProfile.email,
+        "specialty": EditProfile.specialty,
+        "resume": EditProfile.resume,
+        "portfolio": EditProfile.portfolio,
+        "soft_skills": EditProfile.soft_skills,
+        "work_values": EditProfile.work_values,
+    }
+    await state.set_state(state_map[field])
+    await state.update_data(edit_field=field)
+    existing = await db.get_client_by_tg(callback.from_user.id)
+    current = ""
+    if existing:
+        if field == "resume":
+            current = existing.get("resume_link") or ("📎 файл" if existing.get("resume_file_id") else "")
+        else:
+            current = (existing.get(field) or "")[:100]
+    prefix = f"Текущее значение: {current}\n\n" if current else ""
+    await callback.message.answer(prefix + question, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+# ── Редактирование одного поля (EditProfile) ─────────────────────
+
+async def _after_edit_field(telegram_id: int, message: Message, state: FSMContext) -> None:
+    await state.clear()
+    c = await db.get_client_by_tg(telegram_id)
+    if c:
+        await message.answer(format_profile(c), parse_mode="HTML", reply_markup=kb_edit_profile())
+
+
+@router.message(EditProfile.full_name)
+async def on_edit_full_name(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, введи ФИО текстом.")
+        return
+    await db.upsert_client(message.from_user.id, full_name=message.text.strip())
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.message(EditProfile.phone)
+async def on_edit_phone(message: Message, state: FSMContext) -> None:
+    text = message.text.strip() if message.text else ""
+    if message.contact:
+        text = message.contact.phone_number
+    await db.upsert_client(message.from_user.id, phone=text)
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.message(EditProfile.email)
+async def on_edit_email(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, введи почту текстом.")
+        return
+    await db.upsert_client(message.from_user.id, email=message.text.strip())
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.message(EditProfile.specialty)
+async def on_edit_specialty(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, введи специальность текстом.")
+        return
+    await db.upsert_client(message.from_user.id, specialty=message.text.strip())
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.message(EditProfile.portfolio)
+async def on_edit_portfolio(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, отправь описание портфолио текстом.")
+        return
+    await db.upsert_client(message.from_user.id, portfolio=message.text.strip())
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.message(EditProfile.soft_skills)
+async def on_edit_soft_skills(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, отправь текст о софт-скиллах.")
+        return
+    await db.upsert_client(message.from_user.id, soft_skills=message.text.strip())
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.message(EditProfile.work_values)
+async def on_edit_work_values(message: Message, state: FSMContext) -> None:
+    if not message.text or not message.text.strip():
+        await message.answer("Пожалуйста, отправь текст о ценностях в работе.")
+        return
+    await db.upsert_client(message.from_user.id, work_values=message.text.strip())
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.callback_query(EditProfile.resume, F.data == "survey:skip")
+async def on_edit_resume_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    await db.upsert_client(callback.from_user.id, resume_link=None, resume_file_id=None)
+    await state.clear()
+    c = await db.get_client_by_tg(callback.from_user.id)
+    if c:
+        await callback.message.answer(format_profile(c), parse_mode="HTML", reply_markup=kb_edit_profile())
+    await callback.answer()
+
+
+@router.message(EditProfile.resume, F.document)
+async def on_edit_resume_file(message: Message, state: FSMContext) -> None:
+    await db.upsert_client(
+        message.from_user.id,
+        resume_file_id=message.document.file_id,
+        resume_link=None,
+    )
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.message(EditProfile.resume, F.text)
+async def on_edit_resume_link(message: Message, state: FSMContext) -> None:
+    await db.upsert_client(
+        message.from_user.id,
+        resume_link=message.text.strip(),
+        resume_file_id=None,
+    )
+    await _after_edit_field(message.from_user.id, message, state)
+
+
+@router.message(EditProfile.resume)
+async def on_edit_resume_other(message: Message, state: FSMContext) -> None:
+    await message.answer(
+        "Отправь резюме PDF-файлом или ссылкой. Либо нажми «Пропустить».",
+        parse_mode="HTML",
+        reply_markup=kb_skip(),
+    )
 
 
 # ── ФИО ─────────────────────────────────────────────────────────
