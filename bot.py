@@ -175,7 +175,10 @@ def kb_edit_profile_fields() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📄 Резюме", callback_data="profile:edit_field:resume")],
         [InlineKeyboardButton(text="🎨 Портфолио", callback_data="profile:edit_field:portfolio")],
         [InlineKeyboardButton(text="🤝 Софт-скиллы", callback_data="profile:edit_field:soft_skills")],
-        [InlineKeyboardButton(text="💡 Ценности в работе", callback_data="profile:edit_field:work_values")],
+        [
+            InlineKeyboardButton(text="💡 Ценности", callback_data="profile:edit_field:work_values"),
+            InlineKeyboardButton(text="◀️ Назад", callback_data="profile:show"),
+        ],
     ])
 
 def kb_continue_survey() -> InlineKeyboardMarkup:
@@ -306,22 +309,52 @@ EDIT_FIELD_PROMPTS = {
 }
 
 
+@router.callback_query(F.data == "profile:show")
+async def profile_show_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Возврат к просмотру профиля из меню редактирования."""
+    await callback.answer()
+    await state.clear()
+    c = await db.get_client_by_tg(callback.from_user.id)
+    if c:
+        try:
+            await callback.message.edit_text(
+                format_profile(c),
+                parse_mode="HTML",
+                reply_markup=kb_edit_profile(),
+            )
+        except Exception:
+            await callback.message.answer(
+                format_profile(c),
+                parse_mode="HTML",
+                reply_markup=kb_edit_profile(),
+            )
+    else:
+        await callback.message.answer("Профиль не найден.", reply_markup=kb_edit_profile())
+
+
 @router.callback_query(F.data == "profile:edit")
 async def edit_profile(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await callback.message.answer(
-        "Что хочешь изменить? Выбери поле:",
-        parse_mode="HTML",
-        reply_markup=kb_edit_profile_fields(),
-    )
     await callback.answer()
+    await state.clear()
+    try:
+        await callback.message.edit_text(
+            "Что хочешь изменить? Выбери поле:",
+            parse_mode="HTML",
+            reply_markup=kb_edit_profile_fields(),
+        )
+    except Exception:
+        await callback.message.answer(
+            "Что хочешь изменить? Выбери поле:",
+            parse_mode="HTML",
+            reply_markup=kb_edit_profile_fields(),
+        )
 
 
 @router.callback_query(F.data.startswith("profile:edit_field:"))
 async def edit_profile_field(callback: CallbackQuery, state: FSMContext) -> None:
-    field = callback.data.replace("profile:edit_field:", "")
+    await callback.answer()
+    field = callback.data.replace("profile:edit_field:", "").strip()
     if field not in EDIT_FIELD_PROMPTS:
-        await callback.answer()
         return
     label, question, kb = EDIT_FIELD_PROMPTS[field]
     state_map = {
@@ -344,8 +377,11 @@ async def edit_profile_field(callback: CallbackQuery, state: FSMContext) -> None
         else:
             current = (existing.get(field) or "")[:100]
     prefix = f"Текущее значение: {current}\n\n" if current else ""
-    await callback.message.answer(prefix + question, parse_mode="HTML", reply_markup=kb)
-    await callback.answer()
+    text = prefix + question
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ── Редактирование одного поля (EditProfile) ─────────────────────
